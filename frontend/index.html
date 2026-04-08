@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Robot Arm RL Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #e0e0e0; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; }
+  #canvas { width: 100vw; height: 100vh; display: block; }
+
+  #ui {
+    position: absolute; top: 0; left: 0; width: 320px; height: 100%;
+    background: rgba(10, 10, 10, 0.85); backdrop-filter: blur(12px);
+    border-right: 1px solid rgba(255,255,255,0.06);
+    padding: 24px; display: flex; flex-direction: column; gap: 20px;
+    overflow-y: auto;
+  }
+
+  h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+  h1 span { color: #888; font-weight: 400; }
+
+  .section { display: flex; flex-direction: column; gap: 8px; }
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #666; }
+
+  .stat-row { display: flex; justify-content: space-between; font-size: 13px; }
+  .stat-row .val { font-variant-numeric: tabular-nums; color: #fff; }
+
+  .slider-group { display: flex; flex-direction: column; gap: 4px; }
+  .slider-group label { font-size: 12px; color: #999; }
+  .slider-group input[type="range"] {
+    -webkit-appearance: none; width: 100%; height: 4px;
+    background: #333; border-radius: 2px; outline: none;
+  }
+  .slider-group input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    background: #fff; border-radius: 50%; cursor: pointer;
+  }
+
+  #reach-btn {
+    padding: 10px 16px; border: none; border-radius: 6px;
+    background: #2563eb; color: #fff; font-size: 14px; font-weight: 500;
+    cursor: pointer; transition: background 0.15s;
+  }
+  #reach-btn:hover { background: #1d4ed8; }
+  #reach-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+  #status {
+    font-size: 12px; color: #888; min-height: 18px;
+  }
+  #status.success { color: #22c55e; }
+  #status.fail { color: #ef4444; }
+  #status.running { color: #eab308; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge-success { background: rgba(34,197,94,0.15); color: #22c55e; }
+  .badge-fail { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+  #instructions {
+    font-size: 12px; color: #555; line-height: 1.5;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding-top: 16px; margin-top: auto;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div id="ui">
+  <h1>Robot Arm <span>RL Demo</span></h1>
+
+  <div class="section">
+    <div class="section-label">Checkpoint</div>
+    <div class="slider-group">
+      <label>Training step: <strong id="step-label">500000</strong></label>
+      <input type="range" id="step-slider" min="0" max="4" value="4">
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Target Position <span id="reach-indicator" style="font-size:10px;color:#666;"></span></div>
+    <div class="slider-group">
+      <label>X: <strong id="tx-label">0.20</strong>m</label>
+      <input type="range" id="tx" min="-0.50" max="0.50" step="0.01" value="0.20">
+    </div>
+    <div class="slider-group">
+      <label>Y: <strong id="ty-label">0.15</strong>m</label>
+      <input type="range" id="ty" min="-0.50" max="0.50" step="0.01" value="0.15">
+    </div>
+    <div class="slider-group">
+      <label>Z: <strong id="tz-label">0.40</strong>m</label>
+      <input type="range" id="tz" min="0.35" max="0.50" step="0.01" value="0.40">
+    </div>
+  </div>
+
+  <button id="reach-btn">Reach Target</button>
+  <div id="status"></div>
+
+  <div class="section" id="result-section" style="display:none;">
+    <div class="section-label">Result</div>
+    <div class="stat-row"><span>Steps</span><span class="val" id="r-steps">-</span></div>
+    <div class="stat-row"><span>Final distance</span><span class="val" id="r-dist">-</span></div>
+    <div class="stat-row"><span>Outcome</span><span class="val" id="r-outcome">-</span></div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Playback</div>
+    <div class="slider-group">
+      <label>Frame: <strong id="frame-label">0</strong></label>
+      <input type="range" id="frame-slider" min="0" max="0" value="0" disabled>
+    </div>
+  </div>
+
+  <div id="instructions">
+    Click <strong>Reach Target</strong> to send the target to the RL agent.
+    Adjust sliders to change target position or checkpoint.
+    Drag the 3D view to orbit.
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// API endpoint: uses localhost for dev, Railway URL for production.
+// Set RAILWAY_URL below after deploying the backend.
+const RAILWAY_URL = 'https://YOUR-APP.up.railway.app';
+const API = window.location.hostname === 'localhost'
+  ? 'http://localhost:8000'
+  : RAILWAY_URL;
+
+// --- Three.js setup ---
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 50);
+camera.position.set(1.2, 0.8, 1.2);
+
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 0.35, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.update();
+
+// Lights
+const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+scene.add(ambient);
+const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+dir.position.set(2, 3, 1);
+scene.add(dir);
+const fill = new THREE.DirectionalLight(0x8888ff, 0.3);
+fill.position.set(-1, 1, -1);
+scene.add(fill);
+
+// Ground
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(3, 3),
+  new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.001;
+scene.add(ground);
+
+// Grid
+const grid = new THREE.GridHelper(2, 20, 0x333333, 0x222222);
+scene.add(grid);
+
+// --- Robot arm geometry (matches URDF exactly) ---
+// Materials
+const matBase = new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.5, metalness: 0.3 });
+const matLink1 = new THREE.MeshStandardMaterial({ color: 0x3366cc, roughness: 0.4, metalness: 0.2 });
+const matLink2 = new THREE.MeshStandardMaterial({ color: 0x33cc66, roughness: 0.4, metalness: 0.2 });
+const matLink3 = new THREE.MeshStandardMaterial({ color: 0xcc3333, roughness: 0.4, metalness: 0.2 });
+const matEE = new THREE.MeshStandardMaterial({ color: 0xffee00, roughness: 0.3, metalness: 0.4 });
+
+// Base (cylinder h=0.05, r=0.06)
+const baseMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.05, 32), matBase);
+baseMesh.position.y = 0.025;
+scene.add(baseMesh);
+
+// Joint 0 pivot (yaw around Y in Three.js = Z in URDF)
+const joint0 = new THREE.Group();
+joint0.position.y = 0.025; // URDF joint_0 origin xyz="0 0 0.025"
+scene.add(joint0);
+
+// Link 1 (cylinder h=0.1, r=0.04, centered at y=0.05 relative to joint0)
+const link1Mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.1, 32), matLink1);
+link1Mesh.position.y = 0.05;
+joint0.add(link1Mesh);
+
+// Joint 1 pivot (pitch around X in Three.js = Y in URDF)
+const joint1 = new THREE.Group();
+joint1.position.y = 0.1; // top of link1
+joint0.add(joint1);
+
+// Link 2 (cylinder h=0.3, r=0.03, centered at y=0.15 relative to joint1)
+const link2Mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.3, 32), matLink2);
+link2Mesh.position.y = 0.15;
+joint1.add(link2Mesh);
+
+// Joint 2 pivot (pitch around X in Three.js = Y in URDF)
+const joint2 = new THREE.Group();
+joint2.position.y = 0.3;
+joint1.add(joint2);
+
+// Link 3 (tapered from 0.02 at base to 0.015 at tip, reveals more of EE sphere)
+const link3Mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.025, 0.3, 32), matLink3);
+link3Mesh.position.y = 0.15;
+joint2.add(link3Mesh);
+
+// EE sphere (r=0.02, offset past the end of link_3)
+const eeMesh = new THREE.Mesh(new THREE.SphereGeometry(0.02, 16, 16), matEE);
+eeMesh.position.y = 0.3;
+joint2.add(eeMesh);
+
+// Joint spheres at pivots
+const jointMat = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.3, metalness: 0.5 });
+[joint0, joint1, joint2].forEach(j => {
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.025, 16, 16), jointMat);
+  j.add(sphere);
+});
+
+// --- Target marker ---
+const targetMat = new THREE.MeshStandardMaterial({ color: 0x00ffff, transparent: true, opacity: 0.6 });
+const targetMesh = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 16), targetMat);
+scene.add(targetMesh);
+
+// Trail line
+const trailMat = new THREE.LineBasicMaterial({ color: 0xffee00, transparent: true, opacity: 0.5 });
+let trailLine = null;
+
+function setJointAngles(q0, q1, q2) {
+  // URDF joint_0: revolute around Z (yaw). In Three.js Y-up, Z-up becomes Y-up.
+  // URDF +j0 rotates from +X toward +Y. Three.js +rotation.y rotates +X toward -Z.
+  // URDF +Y maps to Three.js +Z, so we need -q0.
+  joint0.rotation.y = -q0;
+  // URDF joint_1: revolute around Y (pitch). Maps to Three.js Z axis.
+  // URDF +j1 tilts arm from +Z toward +X. In Three.js that's from +Y toward +X.
+  // Three.js +rotation.z goes +X toward +Y (counterclockwise), so tilting
+  // from +Y toward +X is clockwise = negative.
+  joint1.rotation.z = -q1;
+  // Same axis mapping for joint_2
+  joint2.rotation.z = -q2;
+}
+
+// Arm geometry for cylindrical workspace (loaded from /workspace, fallback defaults)
+let armL1 = 0.3, armL2 = 0.3, armBaseHeight = 0.125, armSafetyMargin = 1.0;
+
+function maxRadiusAtZ(z) {
+  return 0.5;
+}
+
+function updateTarget() {
+  let x = parseFloat(document.getElementById('tx').value);
+  let y = parseFloat(document.getElementById('ty').value);
+  const z = parseFloat(document.getElementById('tz').value);
+
+  // Clamp XY to cylindrical reachable radius at this Z
+  const maxR = maxRadiusAtZ(z);
+  const r = Math.sqrt(x * x + y * y);
+  if (r > maxR && r > 0.001) {
+    x = x * maxR / r;
+    y = y * maxR / r;
+    document.getElementById('tx').value = x.toFixed(2);
+    document.getElementById('ty').value = y.toFixed(2);
+  }
+
+  const indicator = document.getElementById('reach-indicator');
+  if (r >= maxR - 0.01) {
+    indicator.textContent = 'Max Distance';
+    indicator.style.color = '#ef4444';
+  } else {
+    indicator.textContent = '';
+  }
+
+  // URDF(x,y,z) → Three.js(x, z, y). Z-up to Y-up, no sign flips.
+  targetMesh.position.set(x, z, y);
+  document.getElementById('tx-label').textContent = x.toFixed(2);
+  document.getElementById('ty-label').textContent = y.toFixed(2);
+  document.getElementById('tz-label').textContent = z.toFixed(2);
+}
+
+// --- Checkpoint slider ---
+let checkpoints = [];
+
+async function loadCheckpoints() {
+  try {
+    const res = await fetch(`${API}/checkpoints`);
+    const data = await res.json();
+    checkpoints = data.checkpoints;
+    const slider = document.getElementById('step-slider');
+    slider.max = checkpoints.length - 1;
+    slider.value = checkpoints.length - 1;
+    document.getElementById('step-label').textContent = checkpoints[checkpoints.length - 1].toLocaleString();
+  } catch (e) {
+    console.error('Failed to load checkpoints:', e);
+  }
+}
+
+document.getElementById('step-slider').addEventListener('input', (e) => {
+  const idx = parseInt(e.target.value);
+  if (checkpoints[idx] !== undefined) {
+    document.getElementById('step-label').textContent = checkpoints[idx].toLocaleString();
+  }
+});
+
+// --- Simulate ---
+let trajectory = null;
+let animFrame = 0;
+let isAnimating = false;
+
+document.getElementById('reach-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('reach-btn');
+  const status = document.getElementById('status');
+  btn.disabled = true;
+  status.textContent = 'Sending to agent...';
+  status.className = 'running';
+
+  const x = parseFloat(document.getElementById('tx').value);
+  const y = parseFloat(document.getElementById('ty').value);
+  const z = parseFloat(document.getElementById('tz').value);
+  const stepIdx = parseInt(document.getElementById('step-slider').value);
+  const checkpoint = checkpoints[stepIdx] || 500000;
+
+  try {
+    const res = await fetch(`${API}/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: [x, y, z], checkpoint_step: checkpoint }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Simulation failed');
+    }
+
+    const data = await res.json();
+    trajectory = data.trajectory;
+    animFrame = 0;
+    isAnimating = true;
+
+    const frameSlider = document.getElementById('frame-slider');
+    frameSlider.max = trajectory.length - 1;
+    frameSlider.value = 0;
+    frameSlider.disabled = false;
+
+    status.textContent = 'Playing trajectory...';
+    status.className = 'running';
+
+    // Build trail
+    if (trailLine) scene.remove(trailLine);
+    const points = trajectory.map(t => new THREE.Vector3(t.ee[0], t.ee[2], t.ee[1]));
+    // ee is URDF(x,y,z), Three.js needs (x, z, y)
+    const trailGeo = new THREE.BufferGeometry().setFromPoints(points);
+    trailLine = new THREE.Line(trailGeo, trailMat);
+    scene.add(trailLine);
+
+    // Show result after animation
+    document.getElementById('result-section').style.display = 'flex';
+    document.getElementById('r-steps').textContent = data.steps;
+    const finalEE = data.trajectory[data.trajectory.length - 1].ee;
+    const dist = Math.sqrt((finalEE[0]-x)**2 + (finalEE[1]-y)**2 + (finalEE[2]-z)**2);
+    document.getElementById('r-dist').textContent = dist.toFixed(4) + 'm';
+    document.getElementById('r-outcome').innerHTML = data.success
+      ? '<span class="badge badge-success">REACHED</span>'
+      : '<span class="badge badge-fail">MISSED</span>';
+
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+    status.className = 'fail';
+  }
+
+  btn.disabled = false;
+});
+
+// Frame scrubber
+document.getElementById('frame-slider').addEventListener('input', (e) => {
+  if (!trajectory) return;
+  animFrame = parseInt(e.target.value);
+  isAnimating = false;
+  applyFrame(animFrame);
+});
+
+function applyFrame(i) {
+  if (!trajectory || !trajectory[i]) return;
+  const t = trajectory[i];
+  setJointAngles(t.angles[0], t.angles[1], t.angles[2]);
+  document.getElementById('frame-label').textContent = i;
+  document.getElementById('frame-slider').value = i;
+}
+
+// --- Sliders ---
+['tx', 'ty', 'tz'].forEach(id => {
+  document.getElementById(id).addEventListener('input', updateTarget);
+});
+
+// --- Animate ---
+let lastTime = 0;
+const FRAME_INTERVAL = 30; // ms per trajectory frame
+
+function animate(time) {
+  requestAnimationFrame(animate);
+  controls.update();
+
+  if (isAnimating && trajectory) {
+    if (time - lastTime > FRAME_INTERVAL) {
+      applyFrame(animFrame);
+      animFrame++;
+      lastTime = time;
+      if (animFrame >= trajectory.length) {
+        isAnimating = false;
+        const status = document.getElementById('status');
+        status.textContent = trajectory ? 'Done.' : '';
+        status.className = trajectory[trajectory.length - 1] ? '' : 'fail';
+      }
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+// --- Init ---
+async function loadWorkspace() {
+  try {
+    const res = await fetch(`${API}/workspace`);
+    const data = await res.json();
+    if (data.arm) {
+      armL1 = data.arm.L1;
+      armL2 = data.arm.L2;
+      armBaseHeight = data.arm.base_height;
+      armSafetyMargin = data.arm.safety_margin;
+    }
+    // Arm geometry loaded, slider bounds are fixed in HTML
+  } catch (e) {
+    console.warn('Failed to load workspace, using defaults:', e);
+  }
+  updateTarget();
+}
+
+setJointAngles(0, 0, 0);
+loadWorkspace();
+loadCheckpoints();
+animate(0);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+
+</body>
+</html>
