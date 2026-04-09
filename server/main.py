@@ -52,6 +52,7 @@ available_checkpoints: list[int] = []
 workspace_min: list[float] = []
 workspace_max: list[float] = []
 sim_lock = asyncio.Lock()
+last_joint_angles: np.ndarray | None = None
 
 
 def load_checkpoints():
@@ -185,9 +186,12 @@ def _run_simulation(checkpoint_step: int, target: np.ndarray, _models: dict | No
     """Run one episode of simulation. Called in a thread."""
     model_dict = _models if _models is not None else models
     model = model_dict[checkpoint_step]
-    env = RobotArmGoalEnv(render_mode=None, success_threshold=0.025)
+    env = RobotArmGoalEnv(render_mode=None, success_threshold=0.05)
 
+    global last_joint_angles
     obs, _ = env.reset(seed=0)
+    start_angles = last_joint_angles if last_joint_angles is not None else np.zeros(3)
+    env.arm.reset(start_angles)
     env.set_target(target)
     obs = env._get_obs()
 
@@ -213,6 +217,7 @@ def _run_simulation(checkpoint_step: int, target: np.ndarray, _models: dict | No
         if truncated:
             break
 
+    last_joint_angles = env.arm.get_joint_angles().copy()
     env.close()
 
     return SimulateResponse(

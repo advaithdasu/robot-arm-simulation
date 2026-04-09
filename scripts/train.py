@@ -35,7 +35,13 @@ def make_env(seed: int):
 
 
 class CheckpointCallback(BaseCallback):
-    """Save model checkpoints, record eval episodes, and stop if plateaued."""
+    """Save checkpoints, record evals, and monitor stability.
+
+    Two-phase training:
+      Phase 1: Train for the full step budget, track peak success rate.
+      Phase 2: Continue until the rate re-reaches the peak (max 50% extra steps).
+    This ensures we stop on a high point, not in a valley.
+    """
 
     def __init__(
         self,
@@ -43,8 +49,7 @@ class CheckpointCallback(BaseCallback):
         save_path: str,
         recording_path: str,
         eval_target: np.ndarray,
-        patience: int = 3,
-        min_improvement: float = 0.02,
+        total_steps: int = 1_000_000,
         verbose: int = 0,
     ):
         super().__init__(verbose)
@@ -52,38 +57,57 @@ class CheckpointCallback(BaseCallback):
         self.save_path = save_path
         self.recording_path = recording_path
         self.eval_target = eval_target
-        self.patience = patience
-        self.min_improvement = min_improvement
+        self.total_steps = total_steps
         self._best_success_rate = 0.0
-        self._stale_checks = 0
-        self._check_count = 0
+        self._phase = 1  # 1 = exploring, 2 = waiting for peak re-reach
+        self._phase2_max = int(total_steps * 1.5)  # hard cap
+        # Track success rate from episode outcomes directly
+        self._recent_successes: list[bool] = []
+        self._sr_window = 100  # rolling window size
 
     def _on_step(self) -> bool:
+        # --- Track episode outcomes for rolling success rate ---
+        dones = self.locals.get("dones", [])
+        infos = self.locals.get("infos", [])
+        for i, done in enumerate(dones):
+            if done and i < len(infos):
+                final_info = infos[i].get("terminal_info", infos[i])
+                self._recent_successes.append(bool(final_info.get("is_success", False)))
+                if len(self._recent_successes) > self._sr_window:
+                    self._recent_successes = self._recent_successes[-self._sr_window:]
+
+        # --- Success rate check (every 1K steps, need enough episodes) ---
+        if self.num_timesteps % 1_000 == 0 and len(self._recent_successes) >= self._sr_window:
+            current_sr = sum(self._recent_successes) / len(self._recent_successes)
+
+            if current_sr > self._best_success_rate:
+                self._best_success_rate = current_sr
+
+            # Phase transition: budget exhausted, enter phase 2
+            if self._phase == 1 and self.num_timesteps >= self.total_steps:
+                self._phase = 2
+                print(f"\n  PHASE 2: Budget complete. Peak was {self._best_success_rate:.2%}. "
+                      f"Continuing until 99%+ (max {self._phase2_max:,} steps).")
+
+            # Phase 2: stop when we hit 99%+
+            if self._phase == 2:
+                if current_sr >= 0.99:
+                    print(f"\n  TARGET HIT: {current_sr:.2%} at step {self.num_timesteps:,}. Stopping.")
+                    return False
+                if self.num_timesteps >= self._phase2_max:
+                    print(f"\n  PHASE 2 CAP: {self._phase2_max:,} steps without hitting 99%. Stopping.")
+                    return False
+
+        # --- Checkpoint saving + eval (every save_freq steps) ---
         if self.num_timesteps % self.save_freq == 0:
             path = os.path.join(self.save_path, f"checkpoint_{self.num_timesteps}")
             self.model.save(path)
             if self.verbose:
+                current_sr = sum(self._recent_successes) / max(len(self._recent_successes), 1)
+                phase_str = "PHASE 1" if self._phase == 1 else "PHASE 2 (hunting 99%)"
                 print(f"  Checkpoint saved: {path}")
+                print(f"  [{phase_str}] Rolling SR: {current_sr:.2%} (peak: {self._best_success_rate:.2%})")
             self._record_eval_episode(self.num_timesteps)
-
-            # Only stop early if we've hit the target success rate
-            self._check_count += 1
-            if self._check_count >= 3:
-                current_sr = 0.0
-                if hasattr(self.model, 'logger') and self.model.logger is not None:
-                    try:
-                        current_sr = self.logger.name_to_value.get('rollout/success_rate', 0.0)
-                    except Exception:
-                        pass
-
-                if current_sr > self._best_success_rate:
-                    self._best_success_rate = current_sr
-                if self.verbose:
-                    print(f"  Success rate: {current_sr:.2%} (best: {self._best_success_rate:.2%})")
-
-                if self._best_success_rate >= 0.90:
-                    print(f"\n  TARGET REACHED: {self._best_success_rate:.2%} success rate. Stopping.")
-                    return False
         return True
 
     def _record_eval_episode(self, step: int):
@@ -184,7 +208,9 @@ def main():
         else:
             print(f"Resuming from {ckpt_path} (step {resumed_steps:,})")
 
-    remaining_steps = args.steps - resumed_steps
+    # Allow 50% extra steps for phase 2 (peak re-reach). Callback handles stopping.
+    max_steps = int(args.steps * 1.5)
+    remaining_steps = max_steps - resumed_steps
     if remaining_steps <= 0:
         print(f"Already completed {resumed_steps:,} / {args.steps:,} steps. Nothing to do.")
         env.close()
@@ -238,6 +264,7 @@ def main():
         save_path="checkpoints",
         recording_path="recordings",
         eval_target=eval_target,
+        total_steps=args.steps,
         verbose=1,
     )
 
@@ -291,9 +318,9 @@ def _generate_training_curve(total_steps: int):
         print("matplotlib or tensorboard not available, skipping graph")
         return
 
-    # Find the latest tfevents file
+    # Find the latest tfevents file (single file, not directory, to avoid merging old runs)
     log_dir = "./logs/"
-    latest_run = None
+    latest_file = None
     latest_mtime = 0
     for root, dirs, files in os.walk(log_dir):
         for f in files:
@@ -302,14 +329,21 @@ def _generate_training_curve(total_steps: int):
                 mtime = os.path.getmtime(path)
                 if mtime > latest_mtime:
                     latest_mtime = mtime
-                    latest_run = root
+                    latest_file = path
 
-    if latest_run is None:
+    if latest_file is None:
         print("No TensorBoard logs found, skipping graph")
         return
 
-    ea = EventAccumulator(latest_run)
+    # Use a temp directory with only the latest file to avoid loading old runs
+    import shutil
+    import tempfile
+    tmp_log_dir = tempfile.mkdtemp(prefix="tb_graph_")
+    shutil.copy2(latest_file, tmp_log_dir)
+
+    ea = EventAccumulator(tmp_log_dir)
     ea.Reload()
+    shutil.rmtree(tmp_log_dir, ignore_errors=True)
 
     if "rollout/success_rate" not in ea.Tags().get("scalars", []):
         print("No success_rate in logs, skipping graph")

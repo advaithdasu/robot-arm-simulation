@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Robot Arm RL Demo</title>
+<title>Robot Arm — Reinforcement Learning Demo</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0a0a0a; color: #e0e0e0; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; }
@@ -71,7 +71,7 @@
 <canvas id="canvas"></canvas>
 
 <div id="ui">
-  <h1>Robot Arm <span>RL Demo</span></h1>
+  <h1>Robot Arm<br><span>Reinforcement Learning Demo</span></h1>
 
   <div class="section">
     <div class="section-label">Checkpoint</div>
@@ -93,7 +93,7 @@
     </div>
     <div class="slider-group">
       <label>Z: <strong id="tz-label">0.40</strong>m</label>
-      <input type="range" id="tz" min="0.35" max="0.50" step="0.01" value="0.40">
+      <input type="range" id="tz" min="0.10" max="0.55" step="0.01" value="0.40">
     </div>
   </div>
 
@@ -134,6 +134,9 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 // API endpoint: uses localhost for dev, Railway URL for production.
 // Set RAILWAY_URL below after deploying the backend.
@@ -229,7 +232,7 @@ link3Mesh.position.y = 0.15;
 joint2.add(link3Mesh);
 
 // EE sphere (r=0.02, offset past the end of link_3)
-const eeMesh = new THREE.Mesh(new THREE.SphereGeometry(0.02, 16, 16), matEE);
+const eeMesh = new THREE.Mesh(new THREE.SphereGeometry(0.025, 16, 16), matEE);
 eeMesh.position.y = 0.3;
 joint2.add(eeMesh);
 
@@ -242,11 +245,12 @@ const jointMat = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.
 
 // --- Target marker ---
 const targetMat = new THREE.MeshStandardMaterial({ color: 0x00ffff, transparent: true, opacity: 0.6 });
-const targetMesh = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 16), targetMat);
+const targetMesh = new THREE.Mesh(new THREE.SphereGeometry(0.035, 16, 16), targetMat);
 scene.add(targetMesh);
 
-// Trail line
-const trailMat = new THREE.LineBasicMaterial({ color: 0xffee00, transparent: true, opacity: 0.5 });
+// Trail line (thick, using Line2)
+const trailMat = new LineMaterial({ color: 0xffee00, linewidth: 3, transparent: true, opacity: 0.6 });
+trailMat.resolution.set(window.innerWidth, window.innerHeight);
 let trailLine = null;
 
 function setJointAngles(q0, q1, q2) {
@@ -267,7 +271,16 @@ function setJointAngles(q0, q1, q2) {
 let armL1 = 0.3, armL2 = 0.3, armBaseHeight = 0.125, armSafetyMargin = 1.0;
 
 function maxRadiusAtZ(z) {
-  return 0.5;
+  const zRel = z - armBaseHeight;
+  const maxReachSq = (armL1 + armL2) ** 2 - zRel ** 2;
+  if (maxReachSq <= 0) return 0;
+  return Math.min(Math.sqrt(maxReachSq) * armSafetyMargin, 0.525);
+}
+
+function minRadiusAtZ(z) {
+  if (z < 0.30) return 0.20;
+  if (z < 0.40) return 0.10;
+  return 0;
 }
 
 function updateTarget() {
@@ -275,12 +288,18 @@ function updateTarget() {
   let y = parseFloat(document.getElementById('ty').value);
   const z = parseFloat(document.getElementById('tz').value);
 
-  // Clamp XY to cylindrical reachable radius at this Z
+  // Clamp XY to cylindrical reachable annulus at this Z
   const maxR = maxRadiusAtZ(z);
+  const minR = minRadiusAtZ(z);
   const r = Math.sqrt(x * x + y * y);
   if (r > maxR && r > 0.001) {
     x = x * maxR / r;
     y = y * maxR / r;
+    document.getElementById('tx').value = x.toFixed(2);
+    document.getElementById('ty').value = y.toFixed(2);
+  } else if (r < minR && r > 0.001) {
+    x = x * minR / r;
+    y = y * minR / r;
     document.getElementById('tx').value = x.toFixed(2);
     document.getElementById('ty').value = y.toFixed(2);
   }
@@ -369,10 +388,13 @@ document.getElementById('reach-btn').addEventListener('click', async () => {
 
     // Build trail
     if (trailLine) scene.remove(trailLine);
-    const points = trajectory.map(t => new THREE.Vector3(t.ee[0], t.ee[2], t.ee[1]));
     // ee is URDF(x,y,z), Three.js needs (x, z, y)
-    const trailGeo = new THREE.BufferGeometry().setFromPoints(points);
-    trailLine = new THREE.Line(trailGeo, trailMat);
+    const positions = [];
+    trajectory.forEach(t => positions.push(t.ee[0], t.ee[2], t.ee[1]));
+    const trailGeo = new LineGeometry();
+    trailGeo.setPositions(positions);
+    trailLine = new Line2(trailGeo, trailMat);
+    trailLine.computeLineDistances();
     scene.add(trailLine);
 
     // Show result after animation
@@ -416,7 +438,7 @@ function applyFrame(i) {
 
 // --- Animate ---
 let lastTime = 0;
-const FRAME_INTERVAL = 30; // ms per trajectory frame
+const FRAME_INTERVAL = 37.5; // ms per trajectory frame
 
 function animate(time) {
   requestAnimationFrame(animate);
