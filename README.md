@@ -14,7 +14,12 @@ The key challenge: reaching a precise 3D target with only 3 joints requires coor
 
 - **Hindsight Experience Replay (HER):** When the arm misses a target, HER asks "what if the place I actually reached was the target?" This turns every failure into a success for a different goal, dramatically speeding up learning.
 - **Hybrid Reward:** The arm gets a sparse signal (did I reach the target or not?) combined with an exponential proximity bonus that increases as it gets closer. The sparse signal helps HER work, the proximity bonus helps with precision.
-- **Cylindrical Workspace:** Targets are sampled within the arm's analytically-derived reachable volume (a cylinder that narrows at higher elevations), with 25% of training targets placed near the boundary to ensure reliable edge performance.
+- **Cylindrical Workspace:** Targets are sampled within the arm's analytically-derived reachable volume (a cylinder that narrows at higher elevations), with 35% of targets biased toward workspace edges where reaching is hardest.
+- **Two-Phase Training:** Phase 1 trains for the full step budget and tracks the peak success rate. Phase 2 continues until the rate re-reaches that peak, ensuring the final model is saved at a high point rather than in a valley.
+
+### Training Curve
+
+![Training Curve](training_curve.png)
 
 ### Architecture
 

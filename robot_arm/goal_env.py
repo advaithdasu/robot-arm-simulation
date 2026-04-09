@@ -47,7 +47,9 @@ def _compute_max_radius_at_z(z: float) -> float:
     max_reach_sq = (_L1 + _L2) ** 2 - z_rel ** 2
     if max_reach_sq <= 0:
         return 0.0
-    return min(float(np.sqrt(max_reach_sq) * _SAFETY_MARGIN), 0.55)
+    return min(float(np.sqrt(max_reach_sq) * _SAFETY_MARGIN), 0.525)
+
+
 
 
 def _get_workspace_bounds() -> dict:
@@ -58,9 +60,9 @@ def _get_workspace_bounds() -> dict:
         return _workspace_cache[h]
 
     # Z range: analytically derived from arm kinematics.
-    # Below Z=0.35m the arm has a hollow core (can't reach near-center targets)
-    # because the 2 pitch joints can't fold the arm back toward its own base.
-    z_min = 0.35
+    # Z=0.10m is reachable (280 configs, radius 0.23-0.51m) but has a wider
+    # hollow core (min radius ~0.22m). The arm can't reach near-center at low Z.
+    z_min = 0.10
     z_max = _BASE_HEIGHT + (_L1 + _L2) * 0.85 - 0.05
 
     # Also compute a bounding box for observation space bounds (used by server)
@@ -144,20 +146,16 @@ class RobotArmGoalEnv(gym.Env):
         return (sparse + proximity).astype(np.float32)
 
     def _sample_reachable_target(self) -> np.ndarray:
-        """Sample a random target within the arm's cylindrical reachable space.
-
-        30% of targets are placed near the max radius boundary to ensure
-        the policy learns precise control at the edges of the workspace.
-        """
+        """Sample a target within the cylindrical workspace, 35% biased toward edges."""
         for _ in range(100):
             z = self.np_random.uniform(self._z_min, self._z_max)
             max_r = _compute_max_radius_at_z(z)
             if max_r < 0.01:
                 continue
             angle = self.np_random.uniform(0, 2 * np.pi)
-            if self.np_random.uniform() < 0.25:
-                # Edge bias: sample between 85-100% of max radius
-                r = max_r * self.np_random.uniform(0.85, 1.0)
+            if self.np_random.uniform() < 0.35:
+                # Edge bias: sample between 80-100% of max radius
+                r = max_r * self.np_random.uniform(0.80, 1.0)
             else:
                 # Uniform area sampling
                 r = max_r * np.sqrt(self.np_random.uniform(0, 1))
@@ -187,9 +185,9 @@ class RobotArmGoalEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # Random initial joint angles (within 50% of limits)
-        low = self.arm.joint_lower * 0.5
-        high = self.arm.joint_upper * 0.5
+        # Random initial joint angles (within 85% of limits for wider edge coverage)
+        low = self.arm.joint_lower * 0.85
+        high = self.arm.joint_upper * 0.85
         init_angles = self.np_random.uniform(low, high)
         self.arm.reset(init_angles)
         self._step_physics(10)
@@ -235,7 +233,12 @@ class RobotArmGoalEnv(gym.Env):
         terminated = distance < self.success_threshold
         truncated = self._step_count >= self.max_steps
 
-        info = {"distance": distance, "success": terminated, "is_success": terminated}
+        info = {
+            "distance": distance,
+            "success": terminated,
+            "is_success": terminated,
+            "goal": obs["desired_goal"].copy(),
+        }
         return obs, reward, terminated, truncated, info
 
     def set_target(self, target: np.ndarray):

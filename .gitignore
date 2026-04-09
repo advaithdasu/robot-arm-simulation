@@ -1,7 +1,6 @@
 recordings/
 logs/
 training_history/
-training_curve.png
 TODOS.md
 __pycache__/
 *.pyc
